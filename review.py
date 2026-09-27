@@ -1,7 +1,7 @@
 """Linked, snapshot-faithful review: score window <-> transcript <-> radar."""
 import html
 import math
-from PySide6.QtCore import Qt, QRectF, QPointF
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QPolygonF, QFont
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLabel,QComboBox,QPushButton,QTextBrowser,QSplitter
 from rubric import DIMENSIONS
@@ -32,6 +32,76 @@ def matched_indices(score,segments):
 def suggestions(score):
     valid=[k for k in KEYS if k in score.get('dimensions',{})]
     return sorted(valid,key=lambda k:score['dimensions'][k]['score'])[:2]
+
+class AttentionCurve(QWidget):
+    """Actual raw scores only; long missing intervals are never interpolated."""
+    pointSelected=Signal(int)
+    def __init__(self,scores,segments):
+        super().__init__(); self.selected=None; self.setMinimumHeight(190); self.setMaximumHeight(240)
+        self.setFocusPolicy(Qt.StrongFocus); self.setMouseTracking(True)
+        self.setAccessibleName('注意力指数变化曲线，点击评分点或使用左右方向键选择')
+        self.points=[]
+        for i,s in enumerate(scores):
+            try:t=float(s['t']); v=float(s['raw'])
+            except (KeyError,TypeError,ValueError):continue
+            if math.isfinite(t) and math.isfinite(v) and t>=0 and 0<=v<=100:self.points.append((i,t,v))
+        self.points.sort(key=lambda item:item[1])
+        times=[t for _,t,_ in self.points]
+        for s in segments:
+            try:t=float(s['t'])
+            except (KeyError,TypeError,ValueError):continue
+            if math.isfinite(t) and t>=0:times.append(t)
+        self.duration=max([1]+times)
+    def plot_rect(self):return QRectF(46,32,max(1,self.width()-76),max(1,self.height()-65))
+    def position(self,point):
+        _,t,value=point; r=self.plot_rect()
+        return QPointF(r.left()+r.width()*t/self.duration,r.bottom()-r.height()*value/100)
+    def connections(self):
+        return [(a,b) for a,b in zip(self.points,self.points[1:]) if 0<b[1]-a[1]<=30]
+    def select(self,index):self.selected=index; self.update()
+    def closest(self,pos):
+        if not self.points:return None
+        p=min(self.points,key=lambda item:(self.position(item)-pos).manhattanLength())
+        q=self.position(p)
+        return p if math.hypot(q.x()-pos.x(),q.y()-pos.y())<=14 else None
+    def mousePressEvent(self,event):
+        if event.button()==Qt.LeftButton:
+            p=self.closest(event.position())
+            if p is not None:self.pointSelected.emit(p[0])
+        super().mousePressEvent(event)
+    def mouseMoveEvent(self,event):
+        p=self.closest(event.position())
+        self.setToolTip(f'{stamp(p[1])} · {p[2]:.0f}%' if p else '')
+        self.setCursor(Qt.PointingHandCursor if p else Qt.ArrowCursor)
+    def keyPressEvent(self,event):
+        if event.key() in (Qt.Key_Left,Qt.Key_Right) and self.points:
+            order=[p[0] for p in self.points]
+            current=order.index(self.selected) if self.selected in order else (-1 if event.key()==Qt.Key_Right else len(order))
+            target=max(0,min(len(order)-1,current+(1 if event.key()==Qt.Key_Right else -1)))
+            self.pointSelected.emit(order[target]); event.accept(); return
+        super().keyPressEvent(event)
+    def paintEvent(self,event):
+        p=QPainter(self); p.setRenderHint(QPainter.Antialiasing); r=self.plot_rect()
+        p.setFont(QFont('Microsoft YaHei UI',9)); p.setPen(QColor('#465b75'))
+        p.drawText(QRectF(0,0,self.width(),24),Qt.AlignLeft,'注意力指数变化 · 内容吸引力估计（原始评分）')
+        for value in (0,50,100):
+            y=r.bottom()-r.height()*value/100
+            p.setPen(QPen(QColor('#dce4ee'),1)); p.drawLine(QPointF(r.left(),y),QPointF(r.right(),y))
+            p.setPen(QColor('#718197')); p.drawText(QRectF(0,y-10,38,20),Qt.AlignRight,str(value))
+        for i in range(5):
+            x=r.left()+r.width()*i/4
+            p.drawText(QRectF(x-34,r.bottom()+7,68,22),Qt.AlignCenter,stamp(self.duration*i/4))
+        p.setPen(QPen(QColor('#398ae6'),2))
+        for a,b in self.connections():p.drawLine(self.position(a),self.position(b))
+        for point in self.points:
+            q=self.position(point); selected=point[0]==self.selected
+            if selected:
+                p.setPen(QPen(QColor('#b87339'),1,Qt.DashLine)); p.drawLine(QPointF(q.x(),r.top()),QPointF(q.x(),r.bottom()))
+            p.setPen(QPen(QColor('#ffffff'),1)); p.setBrush(QColor('#b87339' if selected else '#398ae6'))
+            p.drawEllipse(q,5 if selected else 3,5 if selected else 3)
+        if not self.points:
+            p.setPen(QColor('#8492a6')); p.drawText(r,Qt.AlignCenter,'暂无有效评分，仅有转写时不绘制曲线')
+        p.end()
 
 class Radar(QWidget):
     def __init__(self):
@@ -76,6 +146,10 @@ class ReviewPane(QWidget):
         prev.clicked.connect(lambda:self.selector.setCurrentIndex(max(0,self.selector.currentIndex()-1)))
         next_.clicked.connect(lambda:self.selector.setCurrentIndex(min(len(scores)-1,self.selector.currentIndex()+1)))
         self.window_label=QLabel(); self.window_label.setWordWrap(True); box.addWidget(self.window_label)
+        self.curve=AttentionCurve(self.scores,self.segments); box.addWidget(self.curve)
+        self.curve.pointSelected.connect(self.selector.setCurrentIndex)
+        curve_hint=QLabel('点击曲线评分点联动原文与雷达图 · 超过 30 秒未评分处断开 · 不含开场初始 100%')
+        curve_hint.setStyleSheet('color:#8793a6;font-size:11px'); curve_hint.setWordWrap(True); box.addWidget(curve_hint)
         split=QSplitter(Qt.Horizontal); box.addWidget(split,1)
         left=QWidget(); left_box=QVBoxLayout(left); left_box.setContentsMargins(0,0,8,0)
         self.radar=Radar(); left_box.addWidget(self.radar)
@@ -104,6 +178,7 @@ class ReviewPane(QWidget):
     def select_score(self,index):
         if not 0<=index<len(self.scores):return
         self.selected=index; s=self.scores[index]; indices=matched_indices(s,self.segments)
+        self.curve.select(index)
         self.window_label.setText(f"评分时间 {stamp(s['t'])}  ·  评估窗口 {stamp(max(0,s['t']-30))}—{stamp(s['t'])}  ·  原始指数 {s['raw']:.0f}%")
         self.radar.values=[s['dimensions'][k]['score'] for k in KEYS]; self.radar.update()
         self.render_transcript(indices)
@@ -135,6 +210,7 @@ class ReviewPane(QWidget):
         else:
             self.selector.setCurrentIndex(-1)
             self.selected=None; self.radar.values=None; self.radar.update()
+            self.curve.select(None)
             self.window_label.setText(f'{stamp(self.segments[index]["t"])} · 这句话没有对应评分，不使用邻近分数替代。')
             self.advice.setPlainText('这句话尚未被任何有效评分窗口覆盖。可能位于排练尾部、服务异常期间，或文字不足以评分。')
             self.render_transcript([index]); self.transcript.scrollToAnchor('s'+str(index))
