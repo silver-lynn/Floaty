@@ -65,5 +65,8 @@ class Subtitles(QWidget):
     def mousePressEvent(self,event):
         if event.button()==Qt.LeftButton:self.drag=event.globalPosition().toPoint()-self.pos()
     def mouseMoveEvent(self,event):
+        if not (event.buttons() & Qt.LeftButton):
+            self.drag=None
+            return
         if self.drag is not None:self.move(event.globalPosition().toPoint()-self.drag)
     def mouseReleaseEvent(self,event):self.drag=None
