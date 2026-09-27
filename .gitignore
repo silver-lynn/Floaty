@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.dpapi
+*.tmp
+*.log
+settings.json
+growth.json
+floaty-session*.json
+floaty-20*.json
+connection-check.json
+dist/
+build/

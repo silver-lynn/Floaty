@@ -1,0 +1,4 @@
+PySide6-Essentials==6.11.2
+sounddevice==0.5.6
+websockets==16.0
+Pillow==12.3.0
