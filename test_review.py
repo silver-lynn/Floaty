@@ -1,7 +1,8 @@
 import unittest
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QUrl
-from review import ReviewPane,matched_indices
+from PySide6.QtCore import QUrl,Qt
+from PySide6.QtTest import QTest
+from review import ReviewPane,matched_indices,AttentionCurve
 from rubric import DIMENSIONS
 from engine import request_body
 
@@ -47,6 +48,25 @@ class ReviewTests(unittest.TestCase):
         _,segments=fixtures(); pane=ReviewPane([],segments)
         self.assertIsNone(pane.radar.values); self.assertIsNone(pane.radar.average)
         self.assertNotIn('优先练习',pane.advice.toPlainText()); pane.deleteLater()
+    def test_curve_click_links_original_and_radar(self):
+        scores,segments=fixtures(); pane=ReviewPane(scores,segments); pane.resize(1000,850); pane.show(); self.app.processEvents()
+        QTest.mouseClick(pane.curve,Qt.LeftButton,pos=pane.curve.position(pane.curve.points[2]).toPoint())
+        self.assertEqual(pane.selected,2); self.assertEqual(pane.curve.selected,2)
+        self.assertEqual(pane.radar.values,[80,70,92,86,90])
+        pane.from_transcript(QUrl('segment:3')); self.assertIsNone(pane.curve.selected)
+        pane.from_transcript(QUrl('segment:0')); self.assertEqual(pane.curve.selected,pane.selected)
+        pane.close(); pane.deleteLater()
+    def test_curve_keyboard_and_no_invented_initial_value(self):
+        scores,segments=fixtures(); pane=ReviewPane(scores,segments)
+        self.assertEqual(pane.curve.points[0],(0,12,scores[0]['raw']))
+        QTest.keyClick(pane.curve,Qt.Key_Right); self.assertEqual(pane.selected,1)
+        QTest.keyClick(pane.curve,Qt.Key_Left); self.assertEqual(pane.selected,0)
+        pane.deleteLater()
+    def test_curve_empty_single_long_gap_and_invalid_values(self):
+        c=AttentionCurve([],[]); self.assertEqual(c.points,[]); self.assertEqual(c.connections(),[])
+        c=AttentionCurve([{'t':8,'raw':60}],[]); self.assertEqual(len(c.points),1); self.assertEqual(c.connections(),[])
+        c=AttentionCurve([{'t':8,'raw':60},{'t':16,'raw':40},{'t':120,'raw':80},{'t':130,'raw':float('nan')}],[{'t':180,'text':'end'}])
+        self.assertEqual(len(c.points),3); self.assertEqual(len(c.connections()),1); self.assertEqual(c.duration,180)
     def test_improvement_target_uses_original_passage(self):
         from io import BytesIO
         from unittest.mock import patch
