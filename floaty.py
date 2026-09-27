@@ -8,7 +8,7 @@ import urllib.error
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QProcess
 from PySide6.QtGui import QPainter, QColor, QPen, QIcon, QPixmap, QAction, QFont, QPainterPath
 from PySide6.QtWidgets import (QApplication, QWidget, QSystemTrayIcon, QMenu, QDialog,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QComboBox, QTextEdit,
@@ -118,7 +118,8 @@ class Floaty(QWidget):
         self.lock_action=self.menu.addAction('锁定位置',self.lock); self.lock_action.setCheckable(True)
         self.pass_action=self.menu.addAction('鼠标穿透（从托盘恢复）',self.pass_through); self.pass_action.setCheckable(True)
         self.menu.addAction('收回屏幕角落',self.reset_position)
-        self.menu.addSeparator(); self.menu.addAction('退出 Floaty',self.quit)
+        self.menu.addSeparator(); self.menu.addAction('重启应用',self.restart)
+        self.menu.addAction('退出 Floaty',self.quit)
         self.tray.setContextMenu(self.menu); self.tray.show()
         self.setToolTip(self.message)
 
@@ -144,19 +145,32 @@ class Floaty(QWidget):
     def tray_click(self,reason):
         if reason==QSystemTrayIcon.DoubleClick: self.settings()
 
-    def lock(self): self.locked=not self.locked
+    def lock(self):
+        self.drag=None
+        self.locked=not self.locked
 
     def pass_through(self):
+        self.drag=None
         self.passthrough=not self.passthrough
         self.setWindowFlag(Qt.WindowTransparentForInput,self.passthrough); self.show()
         self.subtitles.set_passthrough(self.passthrough)
 
-    def contextMenuEvent(self,event): self.menu.popup(event.globalPos())
-    def mouseDoubleClickEvent(self,event): self.settings()
+    def contextMenuEvent(self,event):
+        self.drag=None
+        self.menu.popup(event.globalPos())
+    def mouseDoubleClickEvent(self,event):
+        self.drag=None
+        self.settings()
     def mousePressEvent(self,event):
+        self.drag=None
         if event.button()==Qt.LeftButton and not self.locked:
             self.drag=event.globalPosition().toPoint()-self.pos()
     def mouseMoveEvent(self,event):
+        # A dialog can consume the release event after a double-click.
+        # Never continue an old drag when the left button is no longer held.
+        if self.locked or not (event.buttons() & Qt.LeftButton):
+            self.drag=None
+            return
         if self.drag is not None: self.move(event.globalPosition().toPoint()-self.drag)
     def mouseReleaseEvent(self,event): self.drag=None
     def set_balloon_variant(self,variant):
@@ -342,6 +356,7 @@ class Floaty(QWidget):
         status=QLabel(self.message); status.setWordWrap(True); box.addWidget(status)
         row=QHBoxLayout(); save=QPushButton('应用并验证密钥'); begin=QPushButton('开始排练'); begin.setObjectName('primary')
         row.addWidget(save); row.addWidget(begin); box.addLayout(row)
+        restart_button=QPushButton('重启应用'); restart_button.clicked.connect(self.restart); box.addWidget(restart_button)
         def apply():
             for field in (jev,asr):
                 v=field.text().strip()
@@ -435,12 +450,20 @@ class Floaty(QWidget):
                 self.exported=True
             except OSError:QMessageBox.warning(self,'保存失败','无法写入所选位置，请选择其他文件夹。')
 
-    def quit(self):
+    def restart(self):
+        if self.active or self.finishing or self.busy:
+            QMessageBox.information(self,'先结束排练','请先结束排练，等待转写和评分完成，再重启。'); return
+        if (self.segments or self.scores) and not getattr(self,'exported',False):
+            self.export()
+            if not getattr(self,'exported',False):return
+        self.quit(restarting=True)
+
+    def quit(self,restarting=False):
         self.settle_practice()
         self.active=False; self.generation+=1
         if self.speaker:self.speaker.stop()
         self.subtitles.clear(); self.subtitles.close()
-        self.tray.hide(); QApplication.quit()
+        self.tray.hide(); QApplication.exit(75 if restarting else 0)
 
 def main():
     app=QApplication(sys.argv); app.setQuitOnLastWindowClosed(False); app.setApplicationName('Floaty'); app.setFont(QFont('Microsoft YaHei UI',9))
@@ -456,6 +479,15 @@ def main():
         window.settings()
     server.newConnection.connect(incoming)
     window.notify('Floaty 已在屏幕右上角就位。右键开始排练，双击气球填写 Jev 密钥。')
-    return app.exec()
+    result=app.exec()
+    if result==75:
+        server.close()
+        ok,_=QProcess.startDetached(sys.executable,[str(ROOT/'floaty.py')],str(ROOT))
+        if not ok:
+            server.listen('floaty-desktop-v1'); window.tray.show(); window.show()
+            QMessageBox.warning(window,'重启未成功','无法启动新进程，已保留当前应用。请稍后再试。')
+            return app.exec()
+        return 0
+    return result
 
 if __name__=='__main__':sys.exit(main())
